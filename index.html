@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Al-Fatima Internet Service</title>
+    
+    <!-- Firebase Realtime Database SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+    
     <style>
         :root {
             --bg-gradient-start: #f5f7fa;
@@ -438,6 +443,51 @@
             color: #fca5a5;
         }
 
+        /* Connection Status Indicator */
+        .connection-status {
+            position: fixed;
+            top: 70px;
+            right: 20px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+            z-index: 3000;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            transition: all 0.3s;
+        }
+
+        .connection-status.online {
+            background: #10b981;
+            color: white;
+        }
+
+        .connection-status.offline {
+            background: #ef4444;
+            color: white;
+        }
+
+        .connection-status.syncing {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .connection-status .pulse {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: white;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
         /* Renew Modal Balance Calculation Box - Dark Mode */
         body.dark-mode #renewModal .form-group input[readonly] {
             background: var(--input-bg);
@@ -809,6 +859,12 @@
     </style>
 </head>
 <body>
+    <!-- Connection Status Indicator -->
+    <div class="connection-status online" id="connectionStatus">
+        <div class="pulse"></div>
+        <span>Connected</span>
+    </div>
+
     <div class="container">
         <div class="header">
             <div class="header-left">
@@ -821,6 +877,7 @@
             <div class="header-actions">
                 <button class="theme-toggle" onclick="toggleTheme()" id="themeToggle">🌙</button>
                 <button class="btn btn-secondary" onclick="exportData()">📥 Export</button>
+                <button class="btn btn-secondary" onclick="importData()">📤 Import</button>
                 <button class="btn btn-primary" onclick="openAddCustomerModal()">+ Add Customer</button>
             </div>
         </div>
@@ -1162,7 +1219,170 @@
     </div>
 
     <script>
+        // ============================================
+        // FIREBASE CONFIGURATION & INITIALIZATION
+        // ============================================
+
+        // Firebase Config
+        const firebaseConfig = {
+            apiKey: "AIzaSyBxngiefsTxjuccSbd22HM",
+            authDomain: "alfatima-internet-service.firebaseapp.com",
+            databaseURL: "https://alfatima-internet-service-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "alfatima-internet-service",
+            storageBucket: "alfatima-internet-service.appspot.com",
+            messagingSenderId: "709168057972",
+            appId: "1:709168057972:web:c2e13211bac426ebd9f96"
+        };
+
+        // Initialize Firebase
+        let database = null;
+        let customersRef = null;
+
+        try {
+            firebase.initializeApp(firebaseConfig);
+            database = firebase.database();
+            customersRef = database.ref('customers');
+            console.log('✅ Firebase initialized successfully!');
+        } catch (error) {
+            console.error('Firebase initialization error:', error);
+            alert('Firebase connection error! App will work offline only.');
+        }
+
+        // Connection Status Update Function
+        function updateConnectionStatus(status, text) {
+            const statusEl = document.getElementById('connectionStatus');
+            if (statusEl) {
+                statusEl.className = `connection-status ${status}`;
+                const span = statusEl.querySelector('span');
+                if (span) span.textContent = text;
+            }
+        }
+
+        // Monitor Firebase connection status
+        if (database) {
+            const connectedRef = database.ref('.info/connected');
+            connectedRef.on('value', (snap) => {
+                if (snap.val() === true) {
+                    updateConnectionStatus('online', 'Connected');
+                } else {
+                    updateConnectionStatus('offline', 'Disconnected');
+                }
+            });
+        } else {
+            updateConnectionStatus('offline', 'Offline Mode');
+        }
+
+        // ============================================
+        // REAL-TIME SYNC WITH FIREBASE
+        // ============================================
+
+        function startRealtimeSync() {
+            if (!customersRef) {
+                console.log('Firebase not available, using localStorage only');
+                return;
+            }
+            
+            // Listen to customers for real-time updates
+            customersRef.on('value', (snapshot) => {
+                updateConnectionStatus('syncing', 'Syncing...');
+                
+                customers = [];
+                const data = snapshot.val();
+                
+                if (data) {
+                    // Convert Firebase object to array
+                    Object.keys(data).forEach(key => {
+                        customers.push({
+                            ...data[key],
+                            id: parseInt(key)
+                        });
+                    });
+                    
+                    // Sort by ID (newest first)
+                    customers.sort((a, b) => b.id - a.id);
+                }
+                
+                // Update all UI components
+                renderDashboard();
+                const searchEl = document.getElementById('searchCustomer');
+                const filterEl = document.getElementById('statusFilter');
+                renderCustomers(
+                    searchEl ? searchEl.value : '', 
+                    filterEl ? filterEl.value : ''
+                );
+                renderPayments();
+                
+                const monthFilterEl = document.getElementById('monthFilter');
+                if (monthFilterEl) {
+                    populateMonthFilter();
+                }
+                
+                updateConnectionStatus('online', 'Connected');
+                console.log(`✅ Synced ${customers.length} customers from Firebase`);
+                
+            }, (error) => {
+                console.error('Sync error:', error);
+                updateConnectionStatus('offline', 'Connection Error');
+            });
+        }
+
+        // Save customer to Firebase Realtime Database
+        async function saveCustomerToFirebase(customer) {
+            if (!customersRef) {
+                console.log('Firebase not available, saving to localStorage only');
+                localStorage.setItem('alfatimaCustomers', JSON.stringify(customers));
+                return true;
+            }
+            
+            try {
+                updateConnectionStatus('syncing', 'Saving...');
+                
+                // Save to Firebase using customer.id as key
+                await customersRef.child(String(customer.id)).set(customer);
+                
+                // Also save to localStorage as backup
+                localStorage.setItem('alfatimaCustomers', JSON.stringify(customers));
+                
+                updateConnectionStatus('online', 'Connected');
+                console.log('✅ Customer saved to Firebase:', customer.id);
+                return true;
+                
+            } catch (error) {
+                console.error('Error saving to Firebase:', error);
+                updateConnectionStatus('offline', 'Save Error');
+                // Save to localStorage as fallback
+                localStorage.setItem('alfatimaCustomers', JSON.stringify(customers));
+                return false;
+            }
+        }
+
+        // Delete customer from Firebase
+        async function deleteCustomerFromFirebase(customerId) {
+            if (!customersRef) {
+                console.log('Firebase not available, deleting from localStorage only');
+                return true;
+            }
+            
+            try {
+                updateConnectionStatus('syncing', 'Deleting...');
+                
+                await customersRef.child(String(customerId)).remove();
+                
+                updateConnectionStatus('online', 'Connected');
+                console.log('✅ Customer deleted from Firebase:', customerId);
+                return true;
+                
+            } catch (error) {
+                console.error('Error deleting from Firebase:', error);
+                updateConnectionStatus('offline', 'Delete Error');
+                return false;
+            }
+        }
+
+        // ============================================
         // Data Storage
+        // ============================================
+        
         let customers = JSON.parse(localStorage.getItem('alfatimaCustomers')) || [];
         let currentView = 'customers';
         let activeDropdown = null;
@@ -1176,6 +1396,14 @@
             renderPayments();
             initializeSearch();
             populateMonthFilter();
+            
+            // Start Firebase real-time sync
+            if (customersRef) {
+                startRealtimeSync();
+                console.log('🔥 Firebase real-time sync started');
+            } else {
+                console.log('📦 Running in offline mode (localStorage only)');
+            }
         });
 
         // Theme Toggle
@@ -1440,7 +1668,7 @@
         }
 
         // Customer Form Submit
-        document.getElementById('customerForm').addEventListener('submit', function(e) {
+        document.getElementById('customerForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const id = document.getElementById('customerId').value;
@@ -1463,27 +1691,35 @@
             };
 
             if (id) {
-                // Edit existing
-                const index = customers.findIndex(c => c.id === parseInt(id));
-                customers[index] = { ...customers[index], ...customerData };
-                showNotification('Customer updated successfully!', 'success');
+                // Edit existing customer
+                const customer = customers.find(c => c.id === parseInt(id));
+                if (customer) {
+                    Object.assign(customer, customerData);
+                    customer.id = parseInt(id); // Preserve ID
+                    
+                    // Save to Firebase
+                    await saveCustomerToFirebase(customer);
+                    showNotification('Customer updated successfully!', 'success');
+                }
             } else {
                 // Add new customer
                 if (customers.some(c => c.customerId === customerData.customerId)) {
                     showNotification('Customer ID already exists!', 'error');
                     return;
                 }
+                
                 customerData.id = Date.now();
                 // Initial balance = old arrears + current month package price
                 customerData.balance = customerData.oldArrears + customerData.packagePrice;
                 // Store cycle info for payment deletion purposes
                 customerData.cycleOldArrears = customerData.oldArrears;
                 customerData.cyclePackagePrice = customerData.packagePrice;
-                customers.push(customerData);
+                
+                // Save to Firebase (will trigger real-time update)
+                await saveCustomerToFirebase(customerData);
                 showNotification('Customer added successfully!', 'success');
             }
 
-            saveCustomers();
             closeCustomerModal();
             renderDashboard();
             renderCustomers(document.getElementById('searchCustomer').value, 
@@ -1544,7 +1780,7 @@
         }
 
         // Delete Payment Function
-        function deletePayment(customerId, paymentIndex) {
+        async function deletePayment(customerId, paymentIndex) {
             if (!confirm('Are you sure you want to delete this payment? This will recalculate the balance.')) return;
             
             const customer = customers.find(c => c.id === customerId);
@@ -1564,21 +1800,17 @@
             const cycleTotal = cycleOldArrears + cyclePackagePrice;
             customer.balance = cycleTotal - customer.totalPaid;
             
-            saveCustomers();
+            // Save to Firebase
+            await saveCustomerToFirebase(customer);
+            
             showNotification(`Payment of Rs.${deletedPayment.amount.toLocaleString()} deleted! Balance is now Rs.${customer.balance.toLocaleString()}`, 'success');
             
             // Refresh the payment history display
             renderCustomerPaymentHistory(customer);
-            
-            // Refresh the main view
-            renderDashboard();
-            renderCustomers(document.getElementById('searchCustomer').value, 
-                           document.getElementById('statusFilter').value);
-            renderPayments();
         }
 
         // Payment Form Submit
-        document.getElementById('paymentForm').addEventListener('submit', function(e) {
+        document.getElementById('paymentForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const customerId = parseInt(document.getElementById('paymentCustomerId').value);
@@ -1617,6 +1849,9 @@
             // Calculate new balance (current dues - total paid)
             customer.balance = customer.oldArrears + customer.packagePrice - customer.totalPaid;
             
+            // Save to Firebase
+            await saveCustomerToFirebase(customer);
+            
             // Payment only updates balance - NO expiry extension
             // To extend expiry, user must click "Renew Subscription" button
             
@@ -1626,12 +1861,7 @@
                 showNotification(`Payment recorded! Remaining balance: Rs.${customer.balance}`, 'success');
             }
 
-            saveCustomers();
             closePaymentModal();
-            renderDashboard();
-            renderCustomers(document.getElementById('searchCustomer').value, 
-                           document.getElementById('statusFilter').value);
-            renderPayments();
         });
 
         // Renew Subscription - Open modal with details (works with any balance)
@@ -1704,7 +1934,7 @@
         }
 
         // Handle Renew Form Submission
-        document.getElementById('renewForm').addEventListener('submit', function(e) {
+        document.getElementById('renewForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
             const customerId = parseInt(document.getElementById('renewUserId').value);
@@ -1730,14 +1960,11 @@
             customer.cycleOldArrears = customer.oldArrears;
             customer.cyclePackagePrice = customer.packagePrice;
 
-            saveCustomers();
+            // Save to Firebase
+            await saveCustomerToFirebase(customer);
             closeRenewModal();
             
             showNotification(`Subscription renewed! Expiry: ${formatDate(newExpiryDate)}. New balance: Rs.${customer.balance.toLocaleString()}`, 'success');
-            
-            renderDashboard();
-            renderCustomers(document.getElementById('searchCustomer').value, 
-                           document.getElementById('statusFilter').value);
         });
 
         // Payment History Modal
@@ -1771,7 +1998,7 @@
         }
 
         // Delete payment from history modal
-        function deletePaymentFromHistory(customerId, paymentIndex) {
+        async function deletePaymentFromHistory(customerId, paymentIndex) {
             if (!confirm('Are you sure you want to delete this payment? This will recalculate the balance.')) return;
             
             const customer = customers.find(c => c.id === customerId);
@@ -1791,17 +2018,13 @@
             const cycleTotal = cycleOldArrears + cyclePackagePrice;
             customer.balance = cycleTotal - customer.totalPaid;
             
-            saveCustomers();
+            // Save to Firebase
+            await saveCustomerToFirebase(customer);
+            
             showNotification(`Payment of Rs.${deletedPayment.amount.toLocaleString()} deleted! Balance is now Rs.${customer.balance.toLocaleString()}`, 'success');
             
             // Refresh the history modal display
             viewPaymentHistory(customerId);
-            
-            // Refresh the main view
-            renderDashboard();
-            renderCustomers(document.getElementById('searchCustomer').value, 
-                           document.getElementById('statusFilter').value);
-            renderPayments();
         }
 
         function closeHistoryModal() {
@@ -1938,15 +2161,13 @@ Al-Fatima Internet Service`;
         }
 
         // Delete Customer
-        function deleteCustomer(customerId) {
+        async function deleteCustomer(customerId) {
             if (!confirm('Are you sure you want to delete this customer?')) return;
             
-            customers = customers.filter(c => c.id !== customerId);
-            saveCustomers();
+            // Delete from Firebase
+            await deleteCustomerFromFirebase(customerId);
+            
             showNotification('Customer deleted successfully!', 'success');
-            renderDashboard();
-            renderCustomers(document.getElementById('searchCustomer').value, 
-                           document.getElementById('statusFilter').value);
         }
 
         // Render Payments
@@ -2085,6 +2306,50 @@ Al-Fatima Internet Service`;
             link.download = `alfatima-customers-${new Date().toISOString().split('T')[0]}.json`;
             link.click();
             showNotification('Data exported successfully!', 'success');
+        }
+
+        // Import Data
+        function importData() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'application/json';
+            input.onchange = function(e) {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    try {
+                        const importedData = JSON.parse(event.target.result);
+                        
+                        // Validate data structure
+                        if (!Array.isArray(importedData)) {
+                            showNotification('Invalid file format! Must be an array of customers.', 'error');
+                            return;
+                        }
+                        
+                        // Confirm before overwriting
+                        const confirmMsg = customers.length > 0 
+                            ? `You have ${customers.length} existing customers. Import will replace all data. Continue?`
+                            : `Import ${importedData.length} customers?`;
+                        
+                        if (confirm(confirmMsg)) {
+                            customers = importedData;
+                            saveCustomers();
+                            renderDashboard();
+                            renderCustomers();
+                            renderPayments();
+                            populateMonthFilter();
+                            showNotification(`Successfully imported ${importedData.length} customers!`, 'success');
+                        }
+                    } catch (error) {
+                        showNotification('Error reading file! Please check the file format.', 'error');
+                        console.error('Import error:', error);
+                    }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
         }
 
         // Utility Functions
